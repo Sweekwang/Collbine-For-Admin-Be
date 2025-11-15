@@ -9,7 +9,11 @@ const asyncHandler = require('../utils/asyncHandler');
 // Review Customer Release routes
 router.get('/review-customer-release', collbineEndpoints.reviewCustomerRelease);
 
+router.get('/fullIndividualCustomerDetails', collbineEndpoints.fullIndividualCustomerDetails);
 
+router.post('/reject_customer_review', collbineEndpoints.reject_customer_review);
+
+router.post('/acceptinvitation', collbineEndpoints.acceptinvitation);
 
 // Export the router
 module.exports = router;
