@@ -374,6 +374,19 @@ exports.acceptinvitation = asyncHandler(async (req, res, next) => {
     );
   }
   
+  // Store in ReleaseHistory for audit trail
+  // Primary key: shop_id, Sort key: accepted_at (datetime when accepted)
+  await dynamoDB.send(
+    new PutCommand({
+      TableName: 'ReleaseHistory',
+      Item: {
+        shop_id: retrievedShopId,
+        accepted_at: combinedData.accepted_at, // Sort key (datetime)
+        ...combinedData // Include all combined data
+      }
+    })
+  );
+  
   // Delete from review_customer_release
   await dynamoDB.send(
     new DeleteCommand({
