@@ -15,6 +15,8 @@ router.post('/reject_customer_review', collbineEndpoints.reject_customer_review)
 
 router.post('/acceptinvitation', collbineEndpoints.acceptinvitation);
 
+router.get('/release-history', collbineEndpoints.getReleaseHistory);
+
 // Export the router
 module.exports = router;
 
