@@ -17,6 +17,8 @@ router.post('/acceptinvitation', collbineEndpoints.acceptinvitation);
 
 router.get('/release-history', collbineEndpoints.getReleaseHistory);
 
+router.get('/accepted-reviews-with-address', collbineEndpoints.getAcceptedReviewsWithAddress);
+
 // Export the router
 module.exports = router;
 

@@ -16,6 +16,8 @@
     "@aws-sdk/lib-dynamodb": "^3.928.0",
     "@aws-sdk/s3-request-presigner": "^3.933.0",
     "@aws-sdk/util-dynamodb": "^3.928.0",
+    "@supabase/supabase-js": "^2.86.2",
+    "axios": "^1.13.2",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
     "express": "^5.1.0"
