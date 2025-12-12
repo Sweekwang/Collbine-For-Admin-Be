@@ -5,7 +5,7 @@ const asyncHandler = require('../utils/asyncHandler');
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
 const { DynamoDBDocumentClient } = require('@aws-sdk/lib-dynamodb');
 const { ScanCommand, QueryCommand, PutCommand, DeleteCommand, UpdateCommand } = require('@aws-sdk/lib-dynamodb');
-const { S3Client, GetObjectCommand } = require('@aws-sdk/client-s3');
+const { S3Client, GetObjectCommand, CopyObjectCommand, HeadObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const axios = require('axios');
 const { createClient } = require('@supabase/supabase-js');
@@ -63,6 +63,80 @@ function parseS3Url(url) {
   return null;
 }
 
+// Helper function to unmarshal DynamoDB format to plain JavaScript objects
+function unmarshalDynamoDBItem(item) {
+  if (item === null || item === undefined) {
+    return item;
+  }
+
+  // Handle DynamoDB Map type { "M": {...} }
+  if (item.M && typeof item.M === 'object') {
+    const result = {};
+    for (const [key, value] of Object.entries(item.M)) {
+      result[key] = unmarshalDynamoDBItem(value);
+    }
+    return result;
+  }
+
+  // Handle DynamoDB String type { "S": "..." }
+  if (item.S !== undefined) {
+    return item.S;
+  }
+
+  // Handle DynamoDB Number type { "N": "123" }
+  if (item.N !== undefined) {
+    const num = parseFloat(item.N);
+    return isNaN(num) ? item.N : num;
+  }
+
+  // Handle DynamoDB Boolean type { "BOOL": true }
+  if (item.BOOL !== undefined) {
+    return item.BOOL;
+  }
+
+  // Handle DynamoDB List type { "L": [...] }
+  if (item.L && Array.isArray(item.L)) {
+    return item.L.map(element => unmarshalDynamoDBItem(element));
+  }
+
+  // Handle DynamoDB Null type { "NULL": true }
+  if (item.NULL !== undefined) {
+    return null;
+  }
+
+  // Handle DynamoDB Binary type { "B": Buffer }
+  if (item.B !== undefined) {
+    return item.B;
+  }
+
+  // Handle DynamoDB String Set { "SS": [...] }
+  if (item.SS && Array.isArray(item.SS)) {
+    return item.SS;
+  }
+
+  // Handle DynamoDB Number Set { "NS": [...] }
+  if (item.NS && Array.isArray(item.NS)) {
+    return item.NS.map(n => parseFloat(n));
+  }
+
+  // If it's an array, recursively process each element
+  if (Array.isArray(item)) {
+    return item.map(element => unmarshalDynamoDBItem(element));
+  }
+
+  // If it's a plain object, recursively process each property
+  if (typeof item === 'object') {
+    const result = {};
+    for (const [key, value] of Object.entries(item)) {
+      result[key] = unmarshalDynamoDBItem(value);
+    }
+    return result;
+  }
+
+  // Return as-is if it's already a plain value
+  return item;
+}
+
 // Helper function to presign S3 URL
 async function presignS3Url(url, expiresIn = 3600) {
   try {
@@ -79,6 +153,68 @@ async function presignS3Url(url, expiresIn = 3600) {
   } catch (error) {
     console.error('Error presigning S3 URL:', error);
     return url; // Return original URL on error
+  }
+}
+
+// Helper to copy an image from the private upload bucket to the public live bucket (keeps original in source bucket)
+async function moveImageToLiveBucket(imageUrl) {
+  if (!imageUrl) return null;
+  
+  const src = parseS3Url(imageUrl);
+  if (!src) {
+    console.warn(`Could not parse S3 URL: ${imageUrl}`);
+    return null;
+  }
+
+  const targetBucket = 'collbine-shop-images-live';
+
+  // If already in the target bucket, just return a public URL
+  if (src.bucket === targetBucket) {
+    return `https://${targetBucket}.s3.ap-southeast-1.amazonaws.com/${src.key}`;
+  }
+
+  try {
+    console.log(`Copying image from ${src.bucket}/${src.key} to ${targetBucket}/${src.key}`);
+    
+    // Copy to the public bucket with the same key (keep original in source bucket)
+    await s3Client.send(
+      new CopyObjectCommand({
+        Bucket: targetBucket,
+        Key: src.key,
+        CopySource: `${src.bucket}/${src.key}`
+        // ACL omitted because target bucket enforces bucket-owner access (no ACLs)
+      })
+    );
+    console.log(`Successfully copied image to ${targetBucket}/${src.key}`);
+
+    // Return the new public URL
+    const publicUrl = `https://${targetBucket}.s3.ap-southeast-1.amazonaws.com/${src.key}`;
+    return publicUrl;
+  } catch (err) {
+    // If the source key doesn't exist, check if it's already in the target bucket
+    if (err.Code === 'NoSuchKey' || err.name === 'NoSuchKey') {
+      console.log(`Image not found in source bucket ${src.bucket}/${src.key}, checking target bucket...`);
+      try {
+        // Check if image already exists in target bucket
+        await s3Client.send(
+          new HeadObjectCommand({
+            Bucket: targetBucket,
+            Key: src.key
+          })
+        );
+        // Image exists in target bucket, return public URL
+        console.log(`Image already exists in target bucket, using existing URL`);
+        return `https://${targetBucket}.s3.ap-southeast-1.amazonaws.com/${src.key}`;
+      } catch (headErr) {
+        // Image doesn't exist in either bucket
+        console.warn(`Image not found in source or target bucket: ${src.key}`);
+        return null;
+      }
+    }
+    
+    // For other errors, log and return null
+    console.error(`Error moving image to live bucket (${imageUrl}):`, err.message);
+    return null;
   }
 }
 
@@ -580,6 +716,7 @@ exports.getAcceptedReviewsWithAddress = asyncHandler(async (req, res, next) => {
 
   const shopIds = [shop_id];
   let customerFacing, geocodedLocations;
+  let liveBannerUrl = null, liveThumbnailUrl = null; // Store live bucket URLs for reuse
 
   // Query CustomerFacingDetails for this shop_id
   try {
@@ -601,11 +738,39 @@ exports.getAcceptedReviewsWithAddress = asyncHandler(async (req, res, next) => {
     console.log(`[${shop_id}] SUCCESS: Found CustomerFacingDetails`);
 
     const cf = cfResult.Items[0];
+    
+    // Transform halalcertified: "yes" -> true, "no" -> false, "not applicable" or others -> null
+    let halalcertified = null;
+    if (cf.halalcertified) {
+      const halalValue = String(cf.halalcertified).toLowerCase().trim();
+      if (halalValue === 'yes') {
+        halalcertified = true;
+      } else if (halalValue === 'no') {
+        halalcertified = false;
+      }
+      // "not applicable" or any other value becomes null
+    }
+    
     customerFacing = {
       keywords: cf.keywords ?? null,
       description: cf.description ?? null,
-      displayName: cf.displayName ?? null
+      displayName: cf.displayName ?? null,
+      banner: cf.banner ?? null,
+      thumbnail: cf.thumbnail ?? null,
+      category: cf.category ?? null,
+      halalcertified: halalcertified
     };
+
+    // Copy banner and thumbnail to live bucket once at the start
+    console.log(`[${shop_id}] Copying banner and thumbnail to live bucket...`);
+    if (customerFacing.banner) {
+      liveBannerUrl = await moveImageToLiveBucket(customerFacing.banner);
+      console.log(`[${shop_id}] Banner copied: ${liveBannerUrl || 'failed'}`);
+    }
+    if (customerFacing.thumbnail) {
+      liveThumbnailUrl = await moveImageToLiveBucket(customerFacing.thumbnail);
+      console.log(`[${shop_id}] Thumbnail copied: ${liveThumbnailUrl || 'failed'}`);
+    }
 
     const locations = Array.isArray(cf.locations) ? cf.locations : [];
     if (locations.length === 0) {
@@ -663,6 +828,9 @@ exports.getAcceptedReviewsWithAddress = asyncHandler(async (req, res, next) => {
   if (supabase) {
     try {
       console.log(`[${shop_id}] Step 4: Inserting data into Supabase...`);
+
+      // Use already copied banner and thumbnail URLs (copied earlier)
+
       // Insert one row per location (location_id is the primary key in Supabase)
       const supabaseRows = [];
       resultData.forEach(item => {
@@ -674,20 +842,19 @@ exports.getAcceptedReviewsWithAddress = asyncHandler(async (req, res, next) => {
           supabaseRows.push({
             location_id: locationId,
             shop_id: item.shop_id,
-            sentdatetime: item.sentdatetime || new Date().toISOString(), // Fallback to current datetime if missing
-            accepted_at: item.accepted_at || null,
-            release_type: item.release_type || null,
-            review_status: item.review_status || null,
-            review_time: item.review_time || null,
             keywords: customerFacing.keywords,
             description: customerFacing.description,
             display_name: customerFacing.displayName,
+            category: customerFacing.category,
+            halalcertified: customerFacing.halalcertified,
+            thumbnail: liveThumbnailUrl,
             location_name: loc.locationName ?? null,
             address: loc.address ?? null,
             postal_code: loc.postalCode ?? null,
-            address_id: loc.addressId ?? null,
             latitude: loc.latitude,
-            longitude: loc.longitude
+            longitude: loc.longitude,
+            rating: 5,
+            ranking: 10
           });
         });
       });
@@ -750,25 +917,47 @@ exports.getAcceptedReviewsWithAddress = asyncHandler(async (req, res, next) => {
       ]);
       console.log(`[${shop_id}] SUCCESS: Queried all 4 tables (businessinformations: ${businessInfoResult.Items?.length || 0}, Card_Design: ${cardDesignResult.Items?.length || 0}, CustomerFacingDetails: ${customerFacingResult.Items?.length || 0}, StampData: ${stampDataResult.Items?.length || 0})`);
 
-      // Combine all data from the 4 tables
+      // Unmarshal DynamoDB format data from all 4 tables
+      const unmarshalItems = (items) => {
+        if (!items || !Array.isArray(items)) return [];
+        return items.map(item => unmarshalDynamoDBItem(item));
+      };
+
+      // Unmarshal CustomerFacingDetails and replace banner/thumbnail with live bucket URLs
+      const unmarshaledCustomerFacing = unmarshalItems(customerFacingResult.Items);
+      if (unmarshaledCustomerFacing.length > 0) {
+        // Replace banner and thumbnail with live bucket URLs
+        unmarshaledCustomerFacing.forEach(cfItem => {
+          if (liveBannerUrl) {
+            cfItem.banner = liveBannerUrl;
+          }
+          if (liveThumbnailUrl) {
+            cfItem.thumbnail = liveThumbnailUrl;
+          }
+        });
+      }
+
+      // Combine all data from the 4 tables (unmarshaled, with updated banner/thumbnail URLs)
       const liveShopDetails = {
         shop_id: shop_id,
-        businessinformations: businessInfoResult.Items || [],
-        Card_Design: cardDesignResult.Items || [],
-        CustomerFacingDetails: customerFacingResult.Items || [],
-        StampData: stampDataResult.Items || [],
+        businessinformations: unmarshalItems(businessInfoResult.Items),
+        Card_Design: unmarshalItems(cardDesignResult.Items),
+        CustomerFacingDetails: unmarshaledCustomerFacing,
+        StampData: unmarshalItems(stampDataResult.Items),
         created_at: new Date().toISOString()
       };
 
-      // Store in live_shop_details table
-      console.log(`[${shop_id}] Step 6: Storing data in live_shop_details table...`);
-      await dynamoDB.send(
-        new PutCommand({
-          TableName: 'live_shop_details',
-          Item: liveShopDetails
-        })
-      );
-      console.log(`[${shop_id}] SUCCESS: Data stored in live_shop_details table`);
+      // Store in live_shop_details table in Supabase
+      console.log(`[${shop_id}] Step 6: Storing data in live_shop_details table (Supabase)...`);
+      const { error: liveShopError } = await supabase
+        .from('live_shop_details')
+        .upsert(liveShopDetails, { onConflict: 'shop_id' });
+
+      if (liveShopError) {
+        console.error(`[${shop_id}] FAILED: Supabase live_shop_details insertion error -`, liveShopError.message);
+        throw new Error(`Supabase live_shop_details insertion failed: ${liveShopError.message}`);
+      }
+      console.log(`[${shop_id}] SUCCESS: Data stored in live_shop_details table (Supabase)`);
 
       // Delete entry from Accepted_Customer_Review after successful storage
       console.log(`[${shop_id}] Step 7: Deleting entry from Accepted_Customer_Review...`);
