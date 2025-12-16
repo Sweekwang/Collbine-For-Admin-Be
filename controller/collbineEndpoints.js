@@ -640,15 +640,65 @@ exports.acceptinvitation = asyncHandler(async (req, res, next) => {
     );
   }
   
+  // Query the 4 tables to include in ReleaseHistory
+  const [businessInfoResult, cardDesignResult, customerFacingResult, stampDataResult] = await Promise.all([
+    dynamoDB.send(
+      new QueryCommand({
+        TableName: 'businessinformations',
+        KeyConditionExpression: 'shop_id = :shop_id',
+        ExpressionAttributeValues: {
+          ':shop_id': retrievedShopId
+        }
+      })
+    ),
+    dynamoDB.send(
+      new QueryCommand({
+        TableName: 'Card_Design',
+        KeyConditionExpression: 'shop_id = :shop_id',
+        ExpressionAttributeValues: {
+          ':shop_id': retrievedShopId
+        }
+      })
+    ),
+    dynamoDB.send(
+      new QueryCommand({
+        TableName: 'CustomerFacingDetails',
+        KeyConditionExpression: 'shop_id = :shop_id',
+        ExpressionAttributeValues: {
+          ':shop_id': retrievedShopId
+        }
+      })
+    ),
+    dynamoDB.send(
+      new QueryCommand({
+        TableName: 'StampData',
+        KeyConditionExpression: 'shop_id = :shop_id',
+        ExpressionAttributeValues: {
+          ':shop_id': retrievedShopId
+        }
+      })
+    )
+  ]);
+
+  // Unmarshal DynamoDB format data from all 4 tables
+  const unmarshalItems = (items) => {
+    if (!items || !Array.isArray(items)) return [];
+    return items.map(item => unmarshalDynamoDBItem(item));
+  };
+
   // Store in ReleaseHistory for audit trail
-  // Primary key: shop_id, Sort key: datetime (datetime when accepted)
+  // Primary key: shop_id, Sort key: datetime (using sentdatetime value, ensures only 1 record per shop_id with this sentdatetime)
   await dynamoDB.send(
     new PutCommand({
       TableName: 'ReleaseHistory',
       Item: {
         shop_id: retrievedShopId,
-        datetime: combinedData.accepted_at, // Sort key (datetime)
-        ...combinedData // Include all combined data
+        datetime: sentdatetime, // Sort key (datetime) - using sentdatetime value for sorting
+        ...combinedData, // Include all combined data
+        businessinformations: unmarshalItems(businessInfoResult.Items),
+        Card_Design: unmarshalItems(cardDesignResult.Items),
+        CustomerFacingDetails: unmarshalItems(customerFacingResult.Items),
+        StampData: unmarshalItems(stampDataResult.Items)
       }
     })
   );
@@ -677,6 +727,44 @@ exports.acceptinvitation = asyncHandler(async (req, res, next) => {
       }
     })
   );
+  
+  // Final step: Check if Rejected_Customer_Review contains this shop and delete it if found
+  console.log(`[${shop_id}] Final step: Checking and deleting from Rejected_Customer_Review...`);
+  try {
+    const rejectedResult = await dynamoDB.send(
+      new QueryCommand({
+        TableName: 'Rejected_Customer_Review',
+        KeyConditionExpression: 'shop_id = :shop_id',
+        ExpressionAttributeValues: {
+          ':shop_id': shop_id
+        }
+      })
+    );
+    
+    if (rejectedResult.Items && rejectedResult.Items.length > 0) {
+      // Delete all rejected entries for this shop_id
+      // Rejected_Customer_Review has shop_id as the primary key (no sort key)
+      for (const rejectedItem of rejectedResult.Items) {
+        // Only shop_id is needed for deletion (PK only, no sort key)
+        const deleteKey = {
+          shop_id: shop_id
+        };
+        
+        await dynamoDB.send(
+          new DeleteCommand({
+            TableName: 'Rejected_Customer_Review',
+            Key: deleteKey
+          })
+        );
+      }
+      console.log(`[${shop_id}] SUCCESS: Deleted ${rejectedResult.Items.length} entry/entries from Rejected_Customer_Review`);
+    } else {
+      console.log(`[${shop_id}] No entries found in Rejected_Customer_Review for this shop_id`);
+    }
+  } catch (error) {
+    // Log error but don't fail the entire operation
+    console.error(`[${shop_id}] FAILED: Error checking/deleting from Rejected_Customer_Review -`, error.message);
+  }
   
   res.status(200).json({
     success: true,
@@ -981,6 +1069,52 @@ exports.getAcceptedReviewsWithAddress = asyncHandler(async (req, res, next) => {
       // Delete entry from Accepted_Customer_Review after successful storage
       console.log(`[${shop_id}] Step 7: Deleting entry from Accepted_Customer_Review...`);
       const acceptedItem = acceptedResult.Items[0];
+      
+      // Get sentdatetime from accepted item for ReleaseHistory sort key
+      const sentdatetime = acceptedItem.sentdatetime;
+      
+      if (!sentdatetime) {
+        console.warn(`[${shop_id}] WARNING: sentdatetime not found in accepted item, skipping ReleaseHistory update`);
+      } else {
+        // Retrieve the stored live_shop_details from Supabase to get complete data
+        // Then add it to DynamoDB ReleaseHistory
+        try {
+          console.log(`[${shop_id}] Step 6.5: Retrieving live_shop_details from Supabase and adding to ReleaseHistory (DynamoDB)...`);
+          const { data: retrievedLiveShopDetails, error: retrieveError } = await supabase
+            .from('live_shop_details')
+            .select('*')
+            .eq('shop_id', shop_id)
+            .single();
+
+          // Use retrieved data if available, otherwise fallback to local data
+          const liveShopDetailsForHistory = retrieveError ? liveShopDetails : retrievedLiveShopDetails;
+          
+          if (retrieveError) {
+            console.warn(`[${shop_id}] WARNING: Could not retrieve live_shop_details from Supabase, using local data -`, retrieveError.message);
+          }
+
+          // Add all live_shop_details data to ReleaseHistory
+          // PK: shop_id, SK: datetime (using sentdatetime value, ensures only 1 record per shop_id with this sentdatetime)
+          // Includes: businessinformations, Card_Design, CustomerFacingDetails, StampData (from liveShopDetailsForHistory)
+          const releaseHistoryItem = {
+            shop_id: shop_id,
+            datetime: sentdatetime, // Sort key (datetime) - using sentdatetime value for sorting
+            ...liveShopDetailsForHistory, // Include all live_shop_details data from Supabase (includes the 4 tables)
+            source: 'live_shop_details' // Mark that this came from live_shop_details
+          };
+
+          await dynamoDB.send(
+            new PutCommand({
+              TableName: 'ReleaseHistory',
+              Item: releaseHistoryItem
+            })
+          );
+          console.log(`[${shop_id}] SUCCESS: live_shop_details added to ReleaseHistory (DynamoDB) with sentdatetime: ${sentdatetime}`);
+        } catch (error) {
+          // Log error but don't fail the entire operation
+          console.error(`[${shop_id}] FAILED: Error adding live_shop_details to ReleaseHistory -`, error.message);
+        }
+      }
       
       // Since the query only uses shop_id in KeyConditionExpression, 
       // the table likely only has shop_id as the partition key (no sort key)
