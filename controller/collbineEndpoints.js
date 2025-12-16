@@ -255,46 +255,64 @@ async function presignImageUrls(data) {
 
 // Helper function to geocode address to latitude and longitude
 // For Singapore addresses, use only postal code + country for faster/more reliable lookup
-async function geocodeAddress(addressUnitNumber, addressStreetAddress, addressBuildingName, addressPostalCode) {
-  try {
-    const addressParts = [];
-    if (addressPostalCode && addressPostalCode.trim() !== '') {
-      addressParts.push(addressPostalCode.trim());
-    }
-    addressParts.push('Singapore');
+async function geocodeAddress(addressUnitNumber, addressStreetAddress, addressBuildingName, addressPostalCode, retries = 3) {
+  const addressParts = [];
+  if (addressPostalCode && addressPostalCode.trim() !== '') {
+    addressParts.push(addressPostalCode.trim());
+  }
+  addressParts.push('Singapore');
 
-    const fullAddress = addressParts.join(' ');
+  const fullAddress = addressParts.join(' ');
 
-    if (!fullAddress.trim()) {
-      throw new Error('Address is empty');
+  if (!fullAddress.trim()) {
+    throw new Error('Address is empty');
+  }
+  
+  // Use OpenStreetMap Nominatim API (free, no API key required)
+  // Note: Add a delay to respect rate limits (1 request per second recommended)
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const response = await axios.get('https://nominatim.openstreetmap.org/search', {
+        params: {
+          q: fullAddress,
+          format: 'json',
+          limit: 1,
+          addressdetails: 1
+        },
+        headers: {
+          'User-Agent': 'Collbine-Admin-App' // Required by Nominatim
+        },
+        timeout: 30000 // 30 second timeout (increased from 10s)
+      });
+      
+      if (!response.data || response.data.length === 0) {
+        throw new Error(`No geocoding results found for address: ${fullAddress}`);
+      }
+      
+      const result = response.data[0];
+      return {
+        latitude: parseFloat(result.lat),
+        longitude: parseFloat(result.lon)
+      };
+    } catch (error) {
+      const isTimeout = error.code === 'ECONNABORTED' || error.message.includes('timeout');
+      const isLastAttempt = attempt === retries;
+      
+      if (isLastAttempt) {
+        throw new Error(`Geocoding failed after ${retries} attempts: ${error.message}`);
+      }
+      
+      if (isTimeout) {
+        // Exponential backoff: wait 2^attempt seconds before retry
+        const waitTime = Math.pow(2, attempt) * 1000;
+        console.warn(`Geocoding timeout for "${fullAddress}" (attempt ${attempt}/${retries}). Retrying in ${waitTime/1000}s...`);
+        await new Promise(resolve => setTimeout(resolve, waitTime));
+      } else {
+        // For non-timeout errors, retry immediately or with shorter delay
+        console.warn(`Geocoding error for "${fullAddress}" (attempt ${attempt}/${retries}): ${error.message}. Retrying...`);
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
     }
-    
-    // Use OpenStreetMap Nominatim API (free, no API key required)
-    // Note: Add a delay to respect rate limits (1 request per second recommended)
-    const response = await axios.get('https://nominatim.openstreetmap.org/search', {
-      params: {
-        q: fullAddress,
-        format: 'json',
-        limit: 1,
-        addressdetails: 1
-      },
-      headers: {
-        'User-Agent': 'Collbine-Admin-App' // Required by Nominatim
-      },
-      timeout: 10000 // 10 second timeout
-    });
-    
-    if (!response.data || response.data.length === 0) {
-      throw new Error(`No geocoding results found for address: ${fullAddress}`);
-    }
-    
-    const result = response.data[0];
-    return {
-      latitude: parseFloat(result.lat),
-      longitude: parseFloat(result.lon)
-    };
-  } catch (error) {
-    throw new Error(`Geocoding failed: ${error.message}`);
   }
 }
 
@@ -536,6 +554,7 @@ exports.reject_customer_review = asyncHandler(async (req, res, next) => {
 
 exports.acceptinvitation = asyncHandler(async (req, res, next) => {
   const { shop_id } = req.body;
+  console.log('shop_id', shop_id);
   
   if (!shop_id) {
     return res.status(400).json({
@@ -622,13 +641,13 @@ exports.acceptinvitation = asyncHandler(async (req, res, next) => {
   }
   
   // Store in ReleaseHistory for audit trail
-  // Primary key: shop_id, Sort key: accepted_at (datetime when accepted)
+  // Primary key: shop_id, Sort key: datetime (datetime when accepted)
   await dynamoDB.send(
     new PutCommand({
       TableName: 'ReleaseHistory',
       Item: {
         shop_id: retrievedShopId,
-        accepted_at: combinedData.accepted_at, // Sort key (datetime)
+        datetime: combinedData.accepted_at, // Sort key (datetime)
         ...combinedData // Include all combined data
       }
     })
@@ -962,14 +981,13 @@ exports.getAcceptedReviewsWithAddress = asyncHandler(async (req, res, next) => {
       // Delete entry from Accepted_Customer_Review after successful storage
       console.log(`[${shop_id}] Step 7: Deleting entry from Accepted_Customer_Review...`);
       const acceptedItem = acceptedResult.Items[0];
+      
+      // Since the query only uses shop_id in KeyConditionExpression, 
+      // the table likely only has shop_id as the partition key (no sort key)
+      // If it had a sort key, we would need to include it in the delete operation
       const deleteKey = {
         shop_id: shop_id
       };
-      
-      // If sentdatetime exists and is part of the composite key, include it
-      if (acceptedItem.sentdatetime) {
-        deleteKey.sentdatetime = acceptedItem.sentdatetime;
-      }
 
       await dynamoDB.send(
         new DeleteCommand({
