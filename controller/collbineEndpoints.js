@@ -865,7 +865,8 @@ exports.getAcceptedReviewsWithAddress = asyncHandler(async (req, res, next) => {
       banner: cf.banner ?? null,
       thumbnail: cf.thumbnail ?? null,
       category: cf.category ?? null,
-      halalcertified: halalcertified
+      halalcertified: halalcertified,
+      website: cf.website ?? null // Optional field - not compulsory
     };
 
     // Copy banner and thumbnail to live bucket once at the start
