@@ -167,10 +167,11 @@ async function moveImageToLiveBucket(imageUrl) {
   }
 
   const targetBucket = 'collbine-shop-images-live';
+  const cloudfrontDomain = 'd1qms1ms25las5.cloudfront.net';
 
-  // If already in the target bucket, just return a public URL
+  // If already in the target bucket, return CloudFront domain + key
   if (src.bucket === targetBucket) {
-    return `https://${targetBucket}.s3.ap-southeast-1.amazonaws.com/${src.key}`;
+    return `https://${cloudfrontDomain}/${src.key}`;
   }
 
   try {
@@ -187,9 +188,8 @@ async function moveImageToLiveBucket(imageUrl) {
     );
     console.log(`Successfully copied image to ${targetBucket}/${src.key}`);
 
-    // Return the new public URL
-    const publicUrl = `https://${targetBucket}.s3.ap-southeast-1.amazonaws.com/${src.key}`;
-    return publicUrl;
+    // Return CloudFront domain + key
+    return `https://${cloudfrontDomain}/${src.key}`;
   } catch (err) {
     // If the source key doesn't exist, check if it's already in the target bucket
     if (err.Code === 'NoSuchKey' || err.name === 'NoSuchKey') {
@@ -202,9 +202,9 @@ async function moveImageToLiveBucket(imageUrl) {
             Key: src.key
           })
         );
-        // Image exists in target bucket, return public URL
-        console.log(`Image already exists in target bucket, using existing URL`);
-        return `https://${targetBucket}.s3.ap-southeast-1.amazonaws.com/${src.key}`;
+        // Image exists in target bucket, return CloudFront domain + key
+        console.log(`Image already exists in target bucket, using existing key`);
+        return `https://${cloudfrontDomain}/${src.key}`;
       } catch (headErr) {
         // Image doesn't exist in either bucket
         console.warn(`Image not found in source or target bucket: ${src.key}`);
@@ -214,6 +214,68 @@ async function moveImageToLiveBucket(imageUrl) {
     
     // For other errors, log and return null
     console.error(`Error moving image to live bucket (${imageUrl}):`, err.message);
+    return null;
+  }
+}
+
+// Helper to copy a reward image from the private upload bucket to the public live reward bucket (keeps original in source bucket)
+async function moveRewardImageToLiveBucket(imageUrl) {
+  if (!imageUrl) return null;
+  
+  const src = parseS3Url(imageUrl);
+  if (!src) {
+    console.warn(`Could not parse S3 URL: ${imageUrl}`);
+    return null;
+  }
+
+  const targetBucket = 'collbine-shop-rewardimages-live';
+  const cloudfrontDomain = 'd2n23ozk9atrac.cloudfront.net';
+
+  // If already in the target bucket, return CloudFront domain + key
+  if (src.bucket === targetBucket) {
+    return `https://${cloudfrontDomain}/${src.key}`;
+  }
+
+  try {
+    console.log(`Copying reward image from ${src.bucket}/${src.key} to ${targetBucket}/${src.key}`);
+    
+    // Copy to the public reward bucket with the same key (keep original in source bucket)
+    await s3Client.send(
+      new CopyObjectCommand({
+        Bucket: targetBucket,
+        Key: src.key,
+        CopySource: `${src.bucket}/${src.key}`
+        // ACL omitted because target bucket enforces bucket-owner access (no ACLs)
+      })
+    );
+    console.log(`Successfully copied reward image to ${targetBucket}/${src.key}`);
+
+    // Return CloudFront domain + key
+    return `https://${cloudfrontDomain}/${src.key}`;
+  } catch (err) {
+    // If the source key doesn't exist, check if it's already in the target bucket
+    if (err.Code === 'NoSuchKey' || err.name === 'NoSuchKey') {
+      console.log(`Reward image not found in source bucket ${src.bucket}/${src.key}, checking target bucket...`);
+      try {
+        // Check if image already exists in target bucket
+        await s3Client.send(
+          new HeadObjectCommand({
+            Bucket: targetBucket,
+            Key: src.key
+          })
+        );
+        // Image exists in target bucket, return CloudFront domain + key
+        console.log(`Reward image already exists in target bucket, using existing key`);
+        return `https://${cloudfrontDomain}/${src.key}`;
+      } catch (headErr) {
+        // Image doesn't exist in either bucket
+        console.warn(`Reward image not found in source or target bucket: ${src.key}`);
+        return null;
+      }
+    }
+    
+    // For other errors, log and return null
+    console.error(`Error moving reward image to live bucket (${imageUrl}):`, err.message);
     return null;
   }
 }
@@ -823,7 +885,8 @@ exports.getAcceptedReviewsWithAddress = asyncHandler(async (req, res, next) => {
 
   const shopIds = [shop_id];
   let customerFacing, geocodedLocations;
-  let liveBannerUrl = null, liveThumbnailUrl = null; // Store live bucket URLs for reuse
+  let liveBannerUrl = null, liveThumbnailUrl = null; // Store CloudFront domain + key (e.g., d1qms1ms25las5.cloudfront.net/key) for reuse
+  let liveRewardImageUrl = null; // Store reward image CloudFront domain + key (e.g., d2n23ozk9atrac.cloudfront.net/key) for reuse
 
   // Query CustomerFacingDetails for this shop_id
   try {
@@ -866,7 +929,8 @@ exports.getAcceptedReviewsWithAddress = asyncHandler(async (req, res, next) => {
       thumbnail: cf.thumbnail ?? null,
       category: cf.category ?? null,
       halalcertified: halalcertified,
-      website: cf.website ?? null // Optional field - not compulsory
+      website: cf.website ?? null, // Optional field - not compulsory
+      rewardImage: cf.rewardImage ?? null // Optional field - reward image
     };
 
     // Copy banner and thumbnail to live bucket once at the start
@@ -878,6 +942,13 @@ exports.getAcceptedReviewsWithAddress = asyncHandler(async (req, res, next) => {
     if (customerFacing.thumbnail) {
       liveThumbnailUrl = await moveImageToLiveBucket(customerFacing.thumbnail);
       console.log(`[${shop_id}] Thumbnail copied: ${liveThumbnailUrl || 'failed'}`);
+    }
+    
+    // Copy reward image to live reward bucket
+    if (customerFacing.rewardImage) {
+      console.log(`[${shop_id}] Copying reward image to live reward bucket...`);
+      liveRewardImageUrl = await moveRewardImageToLiveBucket(customerFacing.rewardImage);
+      console.log(`[${shop_id}] Reward image copied: ${liveRewardImageUrl || 'failed'}`);
     }
 
     const locations = Array.isArray(cf.locations) ? cf.locations : [];
@@ -1031,16 +1102,20 @@ exports.getAcceptedReviewsWithAddress = asyncHandler(async (req, res, next) => {
         return items.map(item => unmarshalDynamoDBItem(item));
       };
 
-      // Unmarshal CustomerFacingDetails and replace banner/thumbnail with live bucket URLs
+      // Unmarshal CustomerFacingDetails and replace banner/thumbnail/rewardImage with CloudFront domain + key
       const unmarshaledCustomerFacing = unmarshalItems(customerFacingResult.Items);
       if (unmarshaledCustomerFacing.length > 0) {
-        // Replace banner and thumbnail with live bucket URLs
+        // Replace banner and thumbnail with CloudFront domain + key (e.g., d1qms1ms25las5.cloudfront.net/key)
+        // Replace rewardImage with CloudFront domain + key (e.g., d2n23ozk9atrac.cloudfront.net/key)
         unmarshaledCustomerFacing.forEach(cfItem => {
           if (liveBannerUrl) {
             cfItem.banner = liveBannerUrl;
           }
           if (liveThumbnailUrl) {
             cfItem.thumbnail = liveThumbnailUrl;
+          }
+          if (liveRewardImageUrl) {
+            cfItem.rewardImage = liveRewardImageUrl;
           }
         });
       }
