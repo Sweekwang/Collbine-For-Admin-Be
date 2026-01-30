@@ -702,8 +702,9 @@ exports.acceptinvitation = asyncHandler(async (req, res, next) => {
     );
   }
   
-  // Query the 4 tables to include in ReleaseHistory
-  const [businessInfoResult, cardDesignResult, customerFacingResult, stampDataResult] = await Promise.all([
+  // Query the 5 tables to include in ReleaseHistory
+  // Query first 3 tables in parallel (required)
+  const [businessInfoResult, cardDesignResult, customerFacingResult] = await Promise.all([
     dynamoDB.send(
       new QueryCommand({
         TableName: 'businessinformations',
@@ -730,19 +731,38 @@ exports.acceptinvitation = asyncHandler(async (req, res, next) => {
           ':shop_id': retrievedShopId
         }
       })
-    ),
-    dynamoDB.send(
-      new QueryCommand({
-        TableName: 'StampData',
-        KeyConditionExpression: 'shop_id = :shop_id',
-        ExpressionAttributeValues: {
-          ':shop_id': retrievedShopId
-        }
-      })
     )
   ]);
 
-  // Unmarshal DynamoDB format data from all 4 tables
+  // Query StampData (optional - log warning if not found, but throw error if query fails)
+  const stampDataResult = await dynamoDB.send(
+    new QueryCommand({
+      TableName: 'StampData',
+      KeyConditionExpression: 'shop_id = :shop_id',
+      ExpressionAttributeValues: {
+        ':shop_id': retrievedShopId
+      }
+    })
+  );
+  if (!stampDataResult.Items || stampDataResult.Items.length === 0) {
+    console.warn(`[${shop_id}] WARNING: No StampData entries found for shop_id ${retrievedShopId}`);
+  }
+
+  // Query qr_configuration (optional - log warning if not found, but throw error if query fails)
+  const qrConfigResult = await dynamoDB.send(
+    new QueryCommand({
+      TableName: 'qr_configuration',
+      KeyConditionExpression: 'shop_id = :shop_id',
+      ExpressionAttributeValues: {
+        ':shop_id': retrievedShopId
+      }
+    })
+  );
+  if (!qrConfigResult.Items || qrConfigResult.Items.length === 0) {
+    console.warn(`[${shop_id}] WARNING: No qr_configuration entries found for shop_id ${retrievedShopId}`);
+  }
+
+  // Unmarshal DynamoDB format data from all 5 tables
   const unmarshalItems = (items) => {
     if (!items || !Array.isArray(items)) return [];
     return items.map(item => unmarshalDynamoDBItem(item));
@@ -760,7 +780,8 @@ exports.acceptinvitation = asyncHandler(async (req, res, next) => {
         businessinformations: unmarshalItems(businessInfoResult.Items),
         Card_Design: unmarshalItems(cardDesignResult.Items),
         CustomerFacingDetails: unmarshalItems(customerFacingResult.Items),
-        StampData: unmarshalItems(stampDataResult.Items)
+        StampData: unmarshalItems(stampDataResult.Items),
+        qr_configuration: unmarshalItems(qrConfigResult.Items)
       }
     })
   );
@@ -887,6 +908,7 @@ exports.getAcceptedReviewsWithAddress = asyncHandler(async (req, res, next) => {
   let customerFacing, geocodedLocations;
   let liveBannerUrl = null, liveThumbnailUrl = null; // Store CloudFront domain + key (e.g., d1qms1ms25las5.cloudfront.net/key) for reuse
   let liveRewardImageUrl = null; // Store reward image CloudFront domain + key (e.g., d2n23ozk9atrac.cloudfront.net/key) for reuse
+  let liveCardImageUrl = null; // Store card image CloudFront domain + key (e.g., https://d1qms1ms25las5.cloudfront.net/key) for reuse
 
   // Query CustomerFacingDetails for this shop_id
   try {
@@ -1053,10 +1075,10 @@ exports.getAcceptedReviewsWithAddress = asyncHandler(async (req, res, next) => {
     }
 
     // Only proceed if Supabase insertion was successful
-    // Retrieve data from all 4 tables and store in live_shop_details
+    // Retrieve data from all 5 tables and store in live_shop_details
     try {
-      console.log(`[${shop_id}] Step 5: Querying 4 tables (businessinformations, Card_Design, CustomerFacingDetails, StampData)...`);
-      const [businessInfoResult, cardDesignResult, customerFacingResult, stampDataResult] = await Promise.all([
+      console.log(`[${shop_id}] Step 5: Querying 5 tables (businessinformations, Card_Design, CustomerFacingDetails, StampData, qr_configuration)...`);
+      const [businessInfoResult, cardDesignResult, customerFacingResult, stampDataResult, qrConfigResult] = await Promise.all([
         dynamoDB.send(
           new QueryCommand({
             TableName: 'businessinformations',
@@ -1092,11 +1114,20 @@ exports.getAcceptedReviewsWithAddress = asyncHandler(async (req, res, next) => {
               ':shop_id': shop_id
             }
           })
+        ),
+        dynamoDB.send(
+          new QueryCommand({
+            TableName: 'qr_configuration',
+            KeyConditionExpression: 'shop_id = :shop_id',
+            ExpressionAttributeValues: {
+              ':shop_id': shop_id
+            }
+          })
         )
       ]);
-      console.log(`[${shop_id}] SUCCESS: Queried all 4 tables (businessinformations: ${businessInfoResult.Items?.length || 0}, Card_Design: ${cardDesignResult.Items?.length || 0}, CustomerFacingDetails: ${customerFacingResult.Items?.length || 0}, StampData: ${stampDataResult.Items?.length || 0})`);
+      console.log(`[${shop_id}] SUCCESS: Queried all 5 tables (businessinformations: ${businessInfoResult.Items?.length || 0}, Card_Design: ${cardDesignResult.Items?.length || 0}, CustomerFacingDetails: ${customerFacingResult.Items?.length || 0}, StampData: ${stampDataResult.Items?.length || 0}, qr_configuration: ${qrConfigResult.Items?.length || 0})`);
 
-      // Unmarshal DynamoDB format data from all 4 tables
+      // Unmarshal DynamoDB format data from all 5 tables
       const unmarshalItems = (items) => {
         if (!items || !Array.isArray(items)) return [];
         return items.map(item => unmarshalDynamoDBItem(item));
@@ -1120,13 +1151,31 @@ exports.getAcceptedReviewsWithAddress = asyncHandler(async (req, res, next) => {
         });
       }
 
-      // Combine all data from the 4 tables (unmarshaled, with updated banner/thumbnail URLs)
+      // Unmarshal qr_configuration and process cardImage
+      const unmarshaledQrConfig = unmarshalItems(qrConfigResult.Items);
+      if (unmarshaledQrConfig.length > 0) {
+        // Process cardImage from qr_configuration
+        for (const qrItem of unmarshaledQrConfig) {
+          if (qrItem.cardImage) {
+            console.log(`[${shop_id}] Copying cardImage from qr_configuration to live bucket...`);
+            liveCardImageUrl = await moveImageToLiveBucket(qrItem.cardImage);
+            console.log(`[${shop_id}] CardImage copied: ${liveCardImageUrl || 'failed'}`);
+            // Replace cardImage with CloudFront domain + key
+            if (liveCardImageUrl) {
+              qrItem.cardImage = liveCardImageUrl;
+            }
+          }
+        }
+      }
+
+      // Combine all data from the 5 tables (unmarshaled, with updated banner/thumbnail/cardImage URLs)
       const liveShopDetails = {
         shop_id: shop_id,
         businessinformations: unmarshalItems(businessInfoResult.Items),
         Card_Design: unmarshalItems(cardDesignResult.Items),
         CustomerFacingDetails: unmarshaledCustomerFacing,
         StampData: unmarshalItems(stampDataResult.Items),
+        qr_configuration: unmarshaledQrConfig,
         created_at: new Date().toISOString()
       };
 
