@@ -31,9 +31,12 @@ const supabase =
 function parseS3Url(url) {
   if (!url || typeof url !== 'string') return null;
   
+  // Remove query parameters and fragments from URL (for presigned URLs)
+  const urlWithoutParams = url.split('?')[0].split('#')[0];
+  
   // Handle s3://bucket/key format
-  if (url.startsWith('s3://')) {
-    const parts = url.replace('s3://', '').split('/');
+  if (urlWithoutParams.startsWith('s3://')) {
+    const parts = urlWithoutParams.replace('s3://', '').split('/');
     return {
       bucket: parts[0],
       key: parts.slice(1).join('/')
@@ -42,7 +45,7 @@ function parseS3Url(url) {
   
   // Handle https://bucket.s3.region.amazonaws.com/key format
   const s3UrlPattern = /https?:\/\/([^.]+)\.s3[.-]([^.]+)\.amazonaws\.com\/(.+)/;
-  const match = url.match(s3UrlPattern);
+  const match = urlWithoutParams.match(s3UrlPattern);
   if (match) {
     return {
       bucket: match[1],
@@ -52,7 +55,7 @@ function parseS3Url(url) {
   
   // Handle https://s3.region.amazonaws.com/bucket/key format
   const s3PathPattern = /https?:\/\/s3[.-]([^.]+)\.amazonaws\.com\/([^\/]+)\/(.+)/;
-  const pathMatch = url.match(s3PathPattern);
+  const pathMatch = urlWithoutParams.match(s3PathPattern);
   if (pathMatch) {
     return {
       bucket: pathMatch[2],
@@ -1151,11 +1154,12 @@ exports.getAcceptedReviewsWithAddress = asyncHandler(async (req, res, next) => {
         });
       }
 
-      // Unmarshal qr_configuration and process cardImage
+      // Unmarshal qr_configuration and process cardImage and rewardImage
       const unmarshaledQrConfig = unmarshalItems(qrConfigResult.Items);
       if (unmarshaledQrConfig.length > 0) {
-        // Process cardImage from qr_configuration
+        // Process cardImage and rewardImage from qr_configuration
         for (const qrItem of unmarshaledQrConfig) {
+          // Process cardImage if it exists at root level
           if (qrItem.cardImage) {
             console.log(`[${shop_id}] Copying cardImage from qr_configuration to live bucket...`);
             liveCardImageUrl = await moveImageToLiveBucket(qrItem.cardImage);
@@ -1163,6 +1167,137 @@ exports.getAcceptedReviewsWithAddress = asyncHandler(async (req, res, next) => {
             // Replace cardImage with CloudFront domain + key
             if (liveCardImageUrl) {
               qrItem.cardImage = liveCardImageUrl;
+            }
+          }
+          
+          // Handle rewardChances - it's stored as a JSON string
+          if (qrItem.rewardChances && typeof qrItem.rewardChances === 'string') {
+            try {
+              console.log(`[${shop_id}] Parsing rewardChances JSON string...`);
+              const rewardChancesArray = JSON.parse(qrItem.rewardChances);
+              
+              if (Array.isArray(rewardChancesArray)) {
+                let updated = false;
+                // Process each reward config in the array
+                for (const rewardConfig of rewardChancesArray) {
+                  if (rewardConfig.reward && rewardConfig.reward.rewardImage) {
+                    // Skip placeholder images
+                    if (rewardConfig.reward.rewardImage.includes('/images/placeholder/')) {
+                      console.log(`[${shop_id}] Skipping placeholder rewardImage: ${rewardConfig.reward.rewardImage}`);
+                      continue;
+                    }
+                    // Skip if already CloudFront URL
+                    if (rewardConfig.reward.rewardImage.includes('cloudfront.net')) {
+                      console.log(`[${shop_id}] RewardImage already CloudFront URL, skipping: ${rewardConfig.reward.rewardImage}`);
+                      continue;
+                    }
+                    console.log(`[${shop_id}] Copying rewardImage from qr_configuration.rewardChances to live reward bucket...`);
+                    console.log(`[${shop_id}] Original rewardImage URL: ${rewardConfig.reward.rewardImage}`);
+                    const qrRewardImageUrl = await moveRewardImageToLiveBucket(rewardConfig.reward.rewardImage);
+                    console.log(`[${shop_id}] QR rewardImage copied: ${qrRewardImageUrl || 'failed'}`);
+                    // Replace rewardImage with CloudFront domain + key
+                    if (qrRewardImageUrl) {
+                      rewardConfig.reward.rewardImage = qrRewardImageUrl;
+                      updated = true;
+                      console.log(`[${shop_id}] Updated rewardImage to: ${qrRewardImageUrl}`);
+                    } else {
+                      console.warn(`[${shop_id}] WARNING: Failed to copy rewardImage, keeping original URL`);
+                    }
+                  }
+                }
+                // Stringify back and update if any images were processed
+                if (updated) {
+                  qrItem.rewardChances = JSON.stringify(rewardChancesArray);
+                  console.log(`[${shop_id}] Updated rewardChances with CloudFront URLs`);
+                }
+              }
+            } catch (error) {
+              console.warn(`[${shop_id}] WARNING: Failed to parse rewardChances JSON -`, error.message);
+            }
+          }
+          
+          // Handle other qr_configuration structures (fallback for different formats)
+          let rewardConfigsToProcess = [];
+          
+          // Case 1: qrItem itself is an array of reward configs
+          if (Array.isArray(qrItem)) {
+            rewardConfigsToProcess = qrItem;
+          }
+          // Case 2: qrItem has a reward object (single reward)
+          else if (qrItem.reward && qrItem.reward.rewardImage) {
+            rewardConfigsToProcess = [qrItem];
+          }
+          // Case 3: qrItem has an array property containing reward configs
+          else if (Array.isArray(qrItem.rewards) || Array.isArray(qrItem.rewardConfigs) || Array.isArray(qrItem.configs)) {
+            rewardConfigsToProcess = qrItem.rewards || qrItem.rewardConfigs || qrItem.configs;
+          }
+          // Case 4: qrItem.rewardImage exists at root level (fallback)
+          else if (qrItem.rewardImage) {
+            rewardConfigsToProcess = [qrItem];
+          }
+          
+          // Process all reward images found (for non-rewardChances structures)
+          for (const rewardConfig of rewardConfigsToProcess) {
+            if (rewardConfig.reward && rewardConfig.reward.rewardImage) {
+              // Skip placeholder images
+              if (rewardConfig.reward.rewardImage.includes('/images/placeholder/')) {
+                console.log(`[${shop_id}] Skipping placeholder rewardImage: ${rewardConfig.reward.rewardImage}`);
+                continue;
+              }
+              // Skip if already CloudFront URL
+              if (rewardConfig.reward.rewardImage.includes('cloudfront.net')) {
+                continue;
+              }
+              console.log(`[${shop_id}] Copying rewardImage from qr_configuration.reward to live reward bucket...`);
+              const qrRewardImageUrl = await moveRewardImageToLiveBucket(rewardConfig.reward.rewardImage);
+              console.log(`[${shop_id}] QR rewardImage copied: ${qrRewardImageUrl || 'failed'}`);
+              // Replace rewardImage with CloudFront domain + key
+              if (qrRewardImageUrl) {
+                rewardConfig.reward.rewardImage = qrRewardImageUrl;
+              }
+            } else if (rewardConfig.rewardImage && !rewardConfig.rewardImage.includes('/images/placeholder/')) {
+              // Fallback: rewardImage at root level
+              if (rewardConfig.rewardImage.includes('cloudfront.net')) {
+                continue;
+              }
+              console.log(`[${shop_id}] Copying rewardImage from qr_configuration to live reward bucket...`);
+              const qrRewardImageUrl = await moveRewardImageToLiveBucket(rewardConfig.rewardImage);
+              console.log(`[${shop_id}] QR rewardImage copied: ${qrRewardImageUrl || 'failed'}`);
+              if (qrRewardImageUrl) {
+                rewardConfig.rewardImage = qrRewardImageUrl;
+              }
+            }
+          }
+        }
+      }
+
+      // Unmarshal StampData and process defaultStampedIcon and defaultUnStampedIcon
+      const unmarshaledStampData = unmarshalItems(stampDataResult.Items);
+      if (unmarshaledStampData.length > 0) {
+        for (const stampItem of unmarshaledStampData) {
+          // Process defaultStampedIcon
+          if (stampItem.defaultStampedIcon) {
+            // Skip if already CloudFront URL
+            if (!stampItem.defaultStampedIcon.includes('cloudfront.net')) {
+              console.log(`[${shop_id}] Copying defaultStampedIcon from StampData to live bucket...`);
+              const stampedIconUrl = await moveImageToLiveBucket(stampItem.defaultStampedIcon);
+              console.log(`[${shop_id}] defaultStampedIcon copied: ${stampedIconUrl || 'failed'}`);
+              if (stampedIconUrl) {
+                stampItem.defaultStampedIcon = stampedIconUrl;
+              }
+            }
+          }
+          
+          // Process defaultUnStampedIcon
+          if (stampItem.defaultUnStampedIcon) {
+            // Skip if already CloudFront URL
+            if (!stampItem.defaultUnStampedIcon.includes('cloudfront.net')) {
+              console.log(`[${shop_id}] Copying defaultUnStampedIcon from StampData to live bucket...`);
+              const unstampedIconUrl = await moveImageToLiveBucket(stampItem.defaultUnStampedIcon);
+              console.log(`[${shop_id}] defaultUnStampedIcon copied: ${unstampedIconUrl || 'failed'}`);
+              if (unstampedIconUrl) {
+                stampItem.defaultUnStampedIcon = unstampedIconUrl;
+              }
             }
           }
         }
@@ -1174,7 +1309,7 @@ exports.getAcceptedReviewsWithAddress = asyncHandler(async (req, res, next) => {
         businessinformations: unmarshalItems(businessInfoResult.Items),
         Card_Design: unmarshalItems(cardDesignResult.Items),
         CustomerFacingDetails: unmarshaledCustomerFacing,
-        StampData: unmarshalItems(stampDataResult.Items),
+        StampData: unmarshaledStampData,
         qr_configuration: unmarshaledQrConfig,
         created_at: new Date().toISOString()
       };
