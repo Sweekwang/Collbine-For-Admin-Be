@@ -673,6 +673,10 @@ exports.acceptinvitation = asyncHandler(async (req, res, next) => {
     ? shopReleaseContactResult.Items[0] 
     : {};
   
+  console.log(`[${shop_id}] shop_release_contact data:`, JSON.stringify(shopReleaseContactItem));
+  console.log(`[${shop_id}] release_type value:`, shopReleaseContactItem.release_type);
+  console.log(`[${shop_id}] release_type type:`, typeof shopReleaseContactItem.release_type);
+  
   // Combine data from both tables
   const combinedData = {
     ...reviewItem,
@@ -682,9 +686,12 @@ exports.acceptinvitation = asyncHandler(async (req, res, next) => {
     accepted_at: new Date().toISOString()
   };
   
-  // Check if release_type is "scheduled" from shop_release_contact
+  // Check if release_type is "schedule" from shop_release_contact
   const releaseType = shopReleaseContactItem.release_type;
-  const isScheduled = releaseType === 'scheduled';
+  // Normalize release_type for comparison (trim whitespace, convert to lowercase)
+  const normalizedReleaseType = releaseType ? String(releaseType).toLowerCase().trim() : null;
+  const isScheduled = normalizedReleaseType === 'schedule';
+  console.log(`[${shop_id}] isScheduled check: releaseType="${releaseType}" (normalized: "${normalizedReleaseType}") === "schedule" = ${isScheduled}`);
   
   // Store in appropriate table based on release_type
   if (isScheduled) {
