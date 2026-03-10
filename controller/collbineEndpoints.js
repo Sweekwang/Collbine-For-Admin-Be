@@ -909,16 +909,16 @@ exports.getScheduledShopIds = asyncHandler(async (req, res, next) => {
     const scanResult = await dynamoDB.send(
       new ScanCommand({
         TableName: 'Scheduled_Accepted_Customer_Review',
-        ProjectionExpression: 'shop_id, schedule_released_date'
+        ProjectionExpression: 'shop_id, release_datetime'
       })
     );
     
-    // Extract shop_id and schedule_released_date for each item
+    // Extract shop_id and release_datetime for each item
     const scheduledShops = (scanResult.Items || []).map(item => {
       const unmarshaledItem = unmarshalDynamoDBItem(item);
       return {
         shop_id: unmarshaledItem.shop_id,
-        schedule_released_date: unmarshaledItem.schedule_released_date ?? null
+        release_datetime: unmarshaledItem.release_datetime ?? null
       };
     }).filter(item => item.shop_id); // Filter out items without shop_id
     
