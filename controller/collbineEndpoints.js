@@ -909,19 +909,25 @@ exports.getScheduledShopIds = asyncHandler(async (req, res, next) => {
     const scanResult = await dynamoDB.send(
       new ScanCommand({
         TableName: 'Scheduled_Accepted_Customer_Review',
-        ProjectionExpression: 'shop_id'
+        ProjectionExpression: 'shop_id, schedule_released_date'
       })
     );
     
-    // Extract unique shop_ids
-    const shopIds = [...new Set((scanResult.Items || []).map(item => item.shop_id).filter(Boolean))];
+    // Extract shop_id and schedule_released_date for each item
+    const scheduledShops = (scanResult.Items || []).map(item => {
+      const unmarshaledItem = unmarshalDynamoDBItem(item);
+      return {
+        shop_id: unmarshaledItem.shop_id,
+        schedule_released_date: unmarshaledItem.schedule_released_date ?? null
+      };
+    }).filter(item => item.shop_id); // Filter out items without shop_id
     
-    console.log(`Found ${shopIds.length} unique shop_id(s) in Scheduled_Accepted_Customer_Review`);
+    console.log(`Found ${scheduledShops.length} scheduled shop(s) in Scheduled_Accepted_Customer_Review`);
     
     res.status(200).json({
       success: true,
-      count: shopIds.length,
-      shop_ids: shopIds
+      count: scheduledShops.length,
+      data: scheduledShops
     });
   } catch (error) {
     console.error('FAILED: Error fetching scheduled shop_ids -', error.message);
