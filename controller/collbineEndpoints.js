@@ -873,6 +873,692 @@ exports.acceptinvitation = asyncHandler(async (req, res, next) => {
   });
 });
 
+// Get all shop_ids from Accepted_Customer_Review
+exports.getAcceptedShopIds = asyncHandler(async (req, res, next) => {
+  try {
+    console.log('Fetching all shop_ids from Accepted_Customer_Review...');
+    
+    const scanResult = await dynamoDB.send(
+      new ScanCommand({
+        TableName: 'Accepted_Customer_Review',
+        ProjectionExpression: 'shop_id'
+      })
+    );
+    
+    // Extract unique shop_ids
+    const shopIds = [...new Set((scanResult.Items || []).map(item => item.shop_id).filter(Boolean))];
+    
+    console.log(`Found ${shopIds.length} unique shop_id(s) in Accepted_Customer_Review`);
+    
+    res.status(200).json({
+      success: true,
+      count: shopIds.length,
+      shop_ids: shopIds
+    });
+  } catch (error) {
+    console.error('FAILED: Error fetching accepted shop_ids -', error.message);
+    throw error;
+  }
+});
+
+// Get all shop_ids from Scheduled_Accepted_Customer_Review
+exports.getScheduledShopIds = asyncHandler(async (req, res, next) => {
+  try {
+    console.log('Fetching all shop_ids from Scheduled_Accepted_Customer_Review...');
+    
+    const scanResult = await dynamoDB.send(
+      new ScanCommand({
+        TableName: 'Scheduled_Accepted_Customer_Review',
+        ProjectionExpression: 'shop_id'
+      })
+    );
+    
+    // Extract unique shop_ids
+    const shopIds = [...new Set((scanResult.Items || []).map(item => item.shop_id).filter(Boolean))];
+    
+    console.log(`Found ${shopIds.length} unique shop_id(s) in Scheduled_Accepted_Customer_Review`);
+    
+    res.status(200).json({
+      success: true,
+      count: shopIds.length,
+      shop_ids: shopIds
+    });
+  } catch (error) {
+    console.error('FAILED: Error fetching scheduled shop_ids -', error.message);
+    throw error;
+  }
+});
+
+// Get accepted review details for a specific shop_id
+exports.getAcceptedReviewDetails = asyncHandler(async (req, res, next) => {
+  const { shop_id } = req.body.shop_id ? req.body : req.query;
+  
+  if (!shop_id) {
+    return res.status(400).json({
+      success: false,
+      error: 'shop_id is required (use query parameter for GET or body for POST)'
+    });
+  }
+  
+  try {
+    console.log(`[${shop_id}] Fetching accepted review details...`);
+    
+    const queryResult = await dynamoDB.send(
+      new QueryCommand({
+        TableName: 'Accepted_Customer_Review',
+        KeyConditionExpression: 'shop_id = :shop_id',
+        ExpressionAttributeValues: {
+          ':shop_id': shop_id
+        }
+      })
+    );
+    
+    if (!queryResult.Items || queryResult.Items.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: `No accepted review found for shop_id ${shop_id}`
+      });
+    }
+    
+    console.log(`[${shop_id}] SUCCESS: Found ${queryResult.Items.length} accepted review record(s)`);
+    
+    res.status(200).json({
+      success: true,
+      count: queryResult.Items.length,
+      shop_id: shop_id,
+      data: queryResult.Items
+    });
+  } catch (error) {
+    console.error(`[${shop_id}] FAILED: Error fetching accepted review details -`, error.message);
+    throw error;
+  }
+});
+
+// Get scheduled review details for a specific shop_id
+exports.getScheduledReviewDetails = asyncHandler(async (req, res, next) => {
+  const { shop_id } = req.body.shop_id ? req.body : req.query;
+  
+  if (!shop_id) {
+    return res.status(400).json({
+      success: false,
+      error: 'shop_id is required (use query parameter for GET or body for POST)'
+    });
+  }
+  
+  try {
+    console.log(`[${shop_id}] Fetching scheduled review details...`);
+    
+    const queryResult = await dynamoDB.send(
+      new QueryCommand({
+        TableName: 'Scheduled_Accepted_Customer_Review',
+        KeyConditionExpression: 'shop_id = :shop_id',
+        ExpressionAttributeValues: {
+          ':shop_id': shop_id
+        }
+      })
+    );
+    
+    if (!queryResult.Items || queryResult.Items.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: `No scheduled review found for shop_id ${shop_id}`
+      });
+    }
+    
+    console.log(`[${shop_id}] SUCCESS: Found ${queryResult.Items.length} scheduled review record(s)`);
+    
+    res.status(200).json({
+      success: true,
+      count: queryResult.Items.length,
+      shop_id: shop_id,
+      data: queryResult.Items
+    });
+  } catch (error) {
+    console.error(`[${shop_id}] FAILED: Error fetching scheduled review details -`, error.message);
+    throw error;
+  }
+});
+
+// Push scheduled review to Supabase (same flow as immediate, but queries Scheduled_Accepted_Customer_Review)
+exports.pushScheduledReviewToSupabase = asyncHandler(async (req, res, next) => {
+  const { shop_id } = req.body;
+
+  console.log(`[${shop_id}] Starting pushScheduledReviewToSupabase process`);
+
+  if (!shop_id) {
+    console.error(`[${shop_id}] FAILED: shop_id is required in request body`);
+    return res.status(400).json({
+      success: false,
+      error: 'shop_id is required in request body'
+    });
+  }
+
+  // Get entries from Scheduled_Accepted_Customer_Review for the given shop_id
+  let acceptedResult;
+  try {
+    console.log(`[${shop_id}] Step 1: Querying Scheduled_Accepted_Customer_Review...`);
+    acceptedResult = await dynamoDB.send(
+      new QueryCommand({
+        TableName: 'Scheduled_Accepted_Customer_Review',
+        KeyConditionExpression: 'shop_id = :shop_id',
+        ExpressionAttributeValues: {
+          ':shop_id': shop_id
+        }
+      })
+    );
+
+    if (!acceptedResult.Items || acceptedResult.Items.length === 0) {
+      console.error(`[${shop_id}] FAILED: No records found in Scheduled_Accepted_Customer_Review`);
+      return res.status(404).json({
+        success: false,
+        error: `No records found in Scheduled_Accepted_Customer_Review for shop_id ${shop_id}`
+      });
+    }
+    console.log(`[${shop_id}] SUCCESS: Found ${acceptedResult.Items.length} record(s) in Scheduled_Accepted_Customer_Review`);
+  } catch (error) {
+    console.error(`[${shop_id}] FAILED: Error querying Scheduled_Accepted_Customer_Review -`, error.message);
+    throw error;
+  }
+
+  const shopIds = [shop_id];
+  let customerFacing, geocodedLocations;
+  let liveBannerUrl = null, liveThumbnailUrl = null; // Store CloudFront domain + key (e.g., d1qms1ms25las5.cloudfront.net/key) for reuse
+  let liveRewardImageUrl = null; // Store reward image CloudFront domain + key (e.g., d2n23ozk9atrac.cloudfront.net/key) for reuse
+  let liveCardImageUrl = null; // Store card image CloudFront domain + key (e.g., https://d1qms1ms25las5.cloudfront.net/key) for reuse
+
+  // Query CustomerFacingDetails for this shop_id
+  try {
+    console.log(`[${shop_id}] Step 2: Querying CustomerFacingDetails...`);
+    const cfResult = await dynamoDB.send(
+      new QueryCommand({
+        TableName: 'CustomerFacingDetails',
+        KeyConditionExpression: 'shop_id = :shop_id',
+        ExpressionAttributeValues: {
+          ':shop_id': shop_id
+        }
+      })
+    );
+
+    if (!cfResult.Items || cfResult.Items.length === 0) {
+      console.error(`[${shop_id}] FAILED: CustomerFacingDetails not found`);
+      throw new Error(`CustomerFacingDetails not found for shop_id ${shop_id}`);
+    }
+    console.log(`[${shop_id}] SUCCESS: Found CustomerFacingDetails`);
+
+    const cf = cfResult.Items[0];
+    
+    // Transform halalcertified: "yes" -> true, "no" -> false, "not applicable" or others -> null
+    let halalcertified = null;
+    if (cf.halalcertified) {
+      const halalValue = String(cf.halalcertified).toLowerCase().trim();
+      if (halalValue === 'yes') {
+        halalcertified = true;
+      } else if (halalValue === 'no') {
+        halalcertified = false;
+      }
+      // "not applicable" or any other value becomes null
+    }
+    
+    customerFacing = {
+      keywords: cf.keywords ?? null,
+      description: cf.description ?? null,
+      displayName: cf.displayName ?? null,
+      banner: cf.banner ?? null,
+      thumbnail: cf.thumbnail ?? null,
+      category: cf.category ?? null,
+      halalcertified: halalcertified,
+      website: cf.website ?? null, // Optional field - not compulsory
+      rewardImage: cf.rewardImage ?? null // Optional field - reward image
+    };
+
+    // Copy banner and thumbnail to live bucket once at the start
+    console.log(`[${shop_id}] Copying banner and thumbnail to live bucket...`);
+    if (customerFacing.banner) {
+      liveBannerUrl = await moveImageToLiveBucket(customerFacing.banner);
+      console.log(`[${shop_id}] Banner copied: ${liveBannerUrl || 'failed'}`);
+    }
+    if (customerFacing.thumbnail) {
+      liveThumbnailUrl = await moveImageToLiveBucket(customerFacing.thumbnail);
+      console.log(`[${shop_id}] Thumbnail copied: ${liveThumbnailUrl || 'failed'}`);
+    }
+    
+    // Copy reward image to live reward bucket
+    if (customerFacing.rewardImage) {
+      console.log(`[${shop_id}] Copying reward image to live reward bucket...`);
+      liveRewardImageUrl = await moveRewardImageToLiveBucket(customerFacing.rewardImage);
+      console.log(`[${shop_id}] Reward image copied: ${liveRewardImageUrl || 'failed'}`);
+    }
+
+    const locations = Array.isArray(cf.locations) ? cf.locations : [];
+    if (locations.length === 0) {
+      console.error(`[${shop_id}] FAILED: Locations not found in CustomerFacingDetails`);
+      throw new Error(`Locations not found for shop_id ${shop_id}`);
+    }
+    console.log(`[${shop_id}] SUCCESS: Found ${locations.length} location(s) to geocode`);
+
+    // Geocode each location sequentially (respect rate limits)
+    geocodedLocations = [];
+    for (let locIndex = 0; locIndex < locations.length; locIndex++) {
+      const loc = locations[locIndex];
+      const postalCode = loc.postalCode ?? loc.postalcode ?? null;
+      if (!postalCode || typeof postalCode !== 'string' || postalCode.trim() === '') {
+        console.error(`[${shop_id}] FAILED: Missing postalCode at location index ${locIndex}`);
+        throw new Error(`Missing postalCode for shop_id ${shop_id} at location index ${locIndex}`);
+      }
+
+      try {
+        console.log(`[${shop_id}] Step 3.${locIndex + 1}: Geocoding location ${locIndex + 1}/${locations.length} (postalCode: ${postalCode})...`);
+        const coordinates = await geocodeAddress(null, null, null, postalCode);
+        geocodedLocations.push({
+          id: loc.id ?? loc.locationId ?? null,
+          locationName: loc.locationName ?? null,
+          addressId: loc.addressId ?? loc.addressID ?? null,
+          address: loc.address ?? loc.addressLine ?? null,
+          postalCode: postalCode,
+          latitude: coordinates.latitude,
+          longitude: coordinates.longitude
+        });
+        console.log(`[${shop_id}] SUCCESS: Geocoded location ${locIndex + 1} (lat: ${coordinates.latitude}, lon: ${coordinates.longitude})`);
+
+        if (locIndex < locations.length - 1) {
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+      } catch (error) {
+        console.error(`[${shop_id}] FAILED: Geocoding failed for location ${locIndex + 1} (postalCode: ${postalCode}) -`, error.message);
+        throw error;
+      }
+    }
+    console.log(`[${shop_id}] SUCCESS: All ${geocodedLocations.length} location(s) geocoded successfully`);
+  } catch (error) {
+    console.error(`[${shop_id}] FAILED: Error in CustomerFacingDetails/geocoding step -`, error.message);
+    throw error;
+  }
+
+  // Combine accepted review data with customer-facing and locations
+  const resultData = acceptedResult.Items.map(item => ({
+    ...item,
+    customerFacing: customerFacing,
+    locations: geocodedLocations
+  }));
+  
+  // Push to Supabase (if configured)
+  if (supabase) {
+    try {
+      console.log(`[${shop_id}] Step 4: Inserting data into Supabase...`);
+
+      // Use already copied banner and thumbnail URLs (copied earlier)
+
+      // Insert one row per location (location_id is the primary key in Supabase)
+      const supabaseRows = [];
+      resultData.forEach(item => {
+        geocodedLocations.forEach((loc, idx) => {
+          const locationId = loc.id;
+          if (!locationId) {
+            throw new Error(`Missing location id for shop_id ${item.shop_id} at location index ${idx}`);
+          }
+          supabaseRows.push({
+            location_id: locationId,
+            shop_id: item.shop_id,
+            keywords: customerFacing.keywords,
+            description: customerFacing.description,
+            display_name: customerFacing.displayName,
+            category: customerFacing.category,
+            halalcertified: customerFacing.halalcertified,
+            thumbnail: liveThumbnailUrl,
+            location_name: loc.locationName ?? null,
+            address: loc.address ?? null,
+            postal_code: loc.postalCode ?? null,
+            latitude: loc.latitude,
+            longitude: loc.longitude,
+            rating: 5,
+            ranking: 10
+          });
+        });
+      });
+
+      const { error: supabaseError } = await supabase
+        .from('accepted_reviews_with_address')
+        .upsert(supabaseRows, { onConflict: 'location_id' });
+
+      if (supabaseError) {
+        console.error(`[${shop_id}] FAILED: Supabase insertion error -`, supabaseError.message);
+        throw new Error(`Supabase insertion failed: ${supabaseError.message}`);
+      }
+      console.log(`[${shop_id}] SUCCESS: Data inserted into Supabase`);
+    } catch (error) {
+      console.error(`[${shop_id}] FAILED: Supabase insertion step -`, error.message);
+      throw error;
+    }
+
+    // Only proceed if Supabase insertion was successful
+    // Retrieve data from all 5 tables and store in live_shop_details
+    try {
+      console.log(`[${shop_id}] Step 5: Querying 5 tables (businessinformations, Card_Design, CustomerFacingDetails, StampData, qr_configuration)...`);
+      const [businessInfoResult, cardDesignResult, customerFacingResult, stampDataResult, qrConfigResult] = await Promise.all([
+        dynamoDB.send(
+          new QueryCommand({
+            TableName: 'businessinformations',
+            KeyConditionExpression: 'shop_id = :shop_id',
+            ExpressionAttributeValues: {
+              ':shop_id': shop_id
+            }
+          })
+        ),
+        dynamoDB.send(
+          new QueryCommand({
+            TableName: 'Card_Design',
+            KeyConditionExpression: 'shop_id = :shop_id',
+            ExpressionAttributeValues: {
+              ':shop_id': shop_id
+            }
+          })
+        ),
+        dynamoDB.send(
+          new QueryCommand({
+            TableName: 'CustomerFacingDetails',
+            KeyConditionExpression: 'shop_id = :shop_id',
+            ExpressionAttributeValues: {
+              ':shop_id': shop_id
+            }
+          })
+        ),
+        dynamoDB.send(
+          new QueryCommand({
+            TableName: 'StampData',
+            KeyConditionExpression: 'shop_id = :shop_id',
+            ExpressionAttributeValues: {
+              ':shop_id': shop_id
+            }
+          })
+        ),
+        dynamoDB.send(
+          new QueryCommand({
+            TableName: 'qr_configuration',
+            KeyConditionExpression: 'shop_id = :shop_id',
+            ExpressionAttributeValues: {
+              ':shop_id': shop_id
+            }
+          })
+        )
+      ]);
+      console.log(`[${shop_id}] SUCCESS: Queried all 5 tables (businessinformations: ${businessInfoResult.Items?.length || 0}, Card_Design: ${cardDesignResult.Items?.length || 0}, CustomerFacingDetails: ${customerFacingResult.Items?.length || 0}, StampData: ${stampDataResult.Items?.length || 0}, qr_configuration: ${qrConfigResult.Items?.length || 0})`);
+
+      // Unmarshal DynamoDB format data from all 5 tables
+      const unmarshalItems = (items) => {
+        if (!items || !Array.isArray(items)) return [];
+        return items.map(item => unmarshalDynamoDBItem(item));
+      };
+
+      // Unmarshal CustomerFacingDetails and replace banner/thumbnail/rewardImage with CloudFront domain + key
+      const unmarshaledCustomerFacing = unmarshalItems(customerFacingResult.Items);
+      if (unmarshaledCustomerFacing.length > 0) {
+        // Replace banner and thumbnail with CloudFront domain + key (e.g., d1qms1ms25las5.cloudfront.net/key)
+        // Replace rewardImage with CloudFront domain + key (e.g., d2n23ozk9atrac.cloudfront.net/key)
+        unmarshaledCustomerFacing.forEach(cfItem => {
+          if (liveBannerUrl) {
+            cfItem.banner = liveBannerUrl;
+          }
+          if (liveThumbnailUrl) {
+            cfItem.thumbnail = liveThumbnailUrl;
+          }
+          if (liveRewardImageUrl) {
+            cfItem.rewardImage = liveRewardImageUrl;
+          }
+        });
+      }
+
+      // Unmarshal qr_configuration and process cardImage and rewardImage
+      const unmarshaledQrConfig = unmarshalItems(qrConfigResult.Items);
+      if (unmarshaledQrConfig.length > 0) {
+        // Process cardImage and rewardImage from qr_configuration
+        for (const qrItem of unmarshaledQrConfig) {
+          // Process cardImage if it exists at root level
+          if (qrItem.cardImage) {
+            console.log(`[${shop_id}] Copying cardImage from qr_configuration to live bucket...`);
+            liveCardImageUrl = await moveImageToLiveBucket(qrItem.cardImage);
+            console.log(`[${shop_id}] CardImage copied: ${liveCardImageUrl || 'failed'}`);
+            // Replace cardImage with CloudFront domain + key
+            if (liveCardImageUrl) {
+              qrItem.cardImage = liveCardImageUrl;
+            }
+          }
+          
+          // Handle rewardChances - it's stored as a JSON string
+          if (qrItem.rewardChances && typeof qrItem.rewardChances === 'string') {
+            try {
+              console.log(`[${shop_id}] Parsing rewardChances JSON string...`);
+              const rewardChancesArray = JSON.parse(qrItem.rewardChances);
+              
+              if (Array.isArray(rewardChancesArray)) {
+                let updated = false;
+                // Process each reward config in the array
+                for (const rewardConfig of rewardChancesArray) {
+                  if (rewardConfig.reward && rewardConfig.reward.rewardImage) {
+                    // Skip placeholder images
+                    if (rewardConfig.reward.rewardImage.includes('/images/placeholder/')) {
+                      console.log(`[${shop_id}] Skipping placeholder rewardImage: ${rewardConfig.reward.rewardImage}`);
+                      continue;
+                    }
+                    // Skip if already CloudFront URL
+                    if (rewardConfig.reward.rewardImage.includes('cloudfront.net')) {
+                      console.log(`[${shop_id}] RewardImage already CloudFront URL, skipping: ${rewardConfig.reward.rewardImage}`);
+                      continue;
+                    }
+                    console.log(`[${shop_id}] Copying rewardImage from qr_configuration.rewardChances to live reward bucket...`);
+                    console.log(`[${shop_id}] Original rewardImage URL: ${rewardConfig.reward.rewardImage}`);
+                    const qrRewardImageUrl = await moveRewardImageToLiveBucket(rewardConfig.reward.rewardImage);
+                    console.log(`[${shop_id}] QR rewardImage copied: ${qrRewardImageUrl || 'failed'}`);
+                    // Replace rewardImage with CloudFront domain + key
+                    if (qrRewardImageUrl) {
+                      rewardConfig.reward.rewardImage = qrRewardImageUrl;
+                      updated = true;
+                      console.log(`[${shop_id}] Updated rewardImage to: ${qrRewardImageUrl}`);
+                    } else {
+                      console.warn(`[${shop_id}] WARNING: Failed to copy rewardImage, keeping original URL`);
+                    }
+                  }
+                }
+                // Stringify back and update if any images were processed
+                if (updated) {
+                  qrItem.rewardChances = JSON.stringify(rewardChancesArray);
+                  console.log(`[${shop_id}] Updated rewardChances with CloudFront URLs`);
+                }
+              }
+            } catch (error) {
+              console.warn(`[${shop_id}] WARNING: Failed to parse rewardChances JSON -`, error.message);
+            }
+          }
+          
+          // Handle other qr_configuration structures (fallback for different formats)
+          let rewardConfigsToProcess = [];
+          
+          // Case 1: qrItem itself is an array of reward configs
+          if (Array.isArray(qrItem)) {
+            rewardConfigsToProcess = qrItem;
+          }
+          // Case 2: qrItem has a reward object (single reward)
+          else if (qrItem.reward && qrItem.reward.rewardImage) {
+            rewardConfigsToProcess = [qrItem];
+          }
+          // Case 3: qrItem has an array property containing reward configs
+          else if (Array.isArray(qrItem.rewards) || Array.isArray(qrItem.rewardConfigs) || Array.isArray(qrItem.configs)) {
+            rewardConfigsToProcess = qrItem.rewards || qrItem.rewardConfigs || qrItem.configs;
+          }
+          // Case 4: qrItem.rewardImage exists at root level (fallback)
+          else if (qrItem.rewardImage) {
+            rewardConfigsToProcess = [qrItem];
+          }
+          
+          // Process all reward images found (for non-rewardChances structures)
+          for (const rewardConfig of rewardConfigsToProcess) {
+            if (rewardConfig.reward && rewardConfig.reward.rewardImage) {
+              // Skip placeholder images
+              if (rewardConfig.reward.rewardImage.includes('/images/placeholder/')) {
+                console.log(`[${shop_id}] Skipping placeholder rewardImage: ${rewardConfig.reward.rewardImage}`);
+                continue;
+              }
+              // Skip if already CloudFront URL
+              if (rewardConfig.reward.rewardImage.includes('cloudfront.net')) {
+                continue;
+              }
+              console.log(`[${shop_id}] Copying rewardImage from qr_configuration.reward to live reward bucket...`);
+              const qrRewardImageUrl = await moveRewardImageToLiveBucket(rewardConfig.reward.rewardImage);
+              console.log(`[${shop_id}] QR rewardImage copied: ${qrRewardImageUrl || 'failed'}`);
+              // Replace rewardImage with CloudFront domain + key
+              if (qrRewardImageUrl) {
+                rewardConfig.reward.rewardImage = qrRewardImageUrl;
+              }
+            } else if (rewardConfig.rewardImage && !rewardConfig.rewardImage.includes('/images/placeholder/')) {
+              // Fallback: rewardImage at root level
+              if (rewardConfig.rewardImage.includes('cloudfront.net')) {
+                continue;
+              }
+              console.log(`[${shop_id}] Copying rewardImage from qr_configuration to live reward bucket...`);
+              const qrRewardImageUrl = await moveRewardImageToLiveBucket(rewardConfig.rewardImage);
+              console.log(`[${shop_id}] QR rewardImage copied: ${qrRewardImageUrl || 'failed'}`);
+              if (qrRewardImageUrl) {
+                rewardConfig.rewardImage = qrRewardImageUrl;
+              }
+            }
+          }
+        }
+      }
+
+      // Unmarshal StampData and process defaultStampedIcon and defaultUnStampedIcon
+      const unmarshaledStampData = unmarshalItems(stampDataResult.Items);
+      if (unmarshaledStampData.length > 0) {
+        for (const stampItem of unmarshaledStampData) {
+          // Process defaultStampedIcon
+          if (stampItem.defaultStampedIcon) {
+            // Skip if already CloudFront URL
+            if (!stampItem.defaultStampedIcon.includes('cloudfront.net')) {
+              console.log(`[${shop_id}] Copying defaultStampedIcon from StampData to live bucket...`);
+              const stampedIconUrl = await moveImageToLiveBucket(stampItem.defaultStampedIcon);
+              console.log(`[${shop_id}] defaultStampedIcon copied: ${stampedIconUrl || 'failed'}`);
+              if (stampedIconUrl) {
+                stampItem.defaultStampedIcon = stampedIconUrl;
+              }
+            }
+          }
+          
+          // Process defaultUnStampedIcon
+          if (stampItem.defaultUnStampedIcon) {
+            // Skip if already CloudFront URL
+            if (!stampItem.defaultUnStampedIcon.includes('cloudfront.net')) {
+              console.log(`[${shop_id}] Copying defaultUnStampedIcon from StampData to live bucket...`);
+              const unstampedIconUrl = await moveImageToLiveBucket(stampItem.defaultUnStampedIcon);
+              console.log(`[${shop_id}] defaultUnStampedIcon copied: ${unstampedIconUrl || 'failed'}`);
+              if (unstampedIconUrl) {
+                stampItem.defaultUnStampedIcon = unstampedIconUrl;
+              }
+            }
+          }
+        }
+      }
+
+      // Combine all data from the 5 tables (unmarshaled, with updated banner/thumbnail/cardImage URLs)
+      const liveShopDetails = {
+        shop_id: shop_id,
+        businessinformations: unmarshalItems(businessInfoResult.Items),
+        Card_Design: unmarshalItems(cardDesignResult.Items),
+        CustomerFacingDetails: unmarshaledCustomerFacing,
+        StampData: unmarshaledStampData,
+        qr_configuration: unmarshaledQrConfig,
+        created_at: new Date().toISOString()
+      };
+
+      // Store in live_shop_details table in Supabase
+      console.log(`[${shop_id}] Step 6: Storing data in live_shop_details table (Supabase)...`);
+      const { error: liveShopError } = await supabase
+        .from('live_shop_details')
+        .upsert(liveShopDetails, { onConflict: 'shop_id' });
+
+      if (liveShopError) {
+        console.error(`[${shop_id}] FAILED: Supabase live_shop_details insertion error -`, liveShopError.message);
+        throw new Error(`Supabase live_shop_details insertion failed: ${liveShopError.message}`);
+      }
+      console.log(`[${shop_id}] SUCCESS: Data stored in live_shop_details table (Supabase)`);
+
+      // Delete entry from Scheduled_Accepted_Customer_Review after successful storage
+      console.log(`[${shop_id}] Step 7: Deleting entry from Scheduled_Accepted_Customer_Review...`);
+      const acceptedItem = acceptedResult.Items[0];
+      
+      // Get sentdatetime from accepted item for ReleaseHistory sort key
+      const sentdatetime = acceptedItem.sentdatetime;
+      
+      if (!sentdatetime) {
+        console.warn(`[${shop_id}] WARNING: sentdatetime not found in accepted item, skipping ReleaseHistory update`);
+      } else {
+        // Retrieve the stored live_shop_details from Supabase to get complete data
+        // Then add it to DynamoDB ReleaseHistory
+        try {
+          console.log(`[${shop_id}] Step 6.5: Retrieving live_shop_details from Supabase and adding to ReleaseHistory (DynamoDB)...`);
+          const { data: retrievedLiveShopDetails, error: retrieveError } = await supabase
+            .from('live_shop_details')
+            .select('*')
+            .eq('shop_id', shop_id)
+            .single();
+
+          // Use retrieved data if available, otherwise fallback to local data
+          const liveShopDetailsForHistory = retrieveError ? liveShopDetails : retrievedLiveShopDetails;
+          
+          if (retrieveError) {
+            console.warn(`[${shop_id}] WARNING: Could not retrieve live_shop_details from Supabase, using local data -`, retrieveError.message);
+          }
+
+          // Add all live_shop_details data to ReleaseHistory
+          // PK: shop_id, SK: datetime (using sentdatetime value, ensures only 1 record per shop_id with this sentdatetime)
+          // Includes: businessinformations, Card_Design, CustomerFacingDetails, StampData (from liveShopDetailsForHistory)
+          const releaseHistoryItem = {
+            shop_id: shop_id,
+            datetime: sentdatetime, // Sort key (datetime) - using sentdatetime value for sorting
+            ...liveShopDetailsForHistory, // Include all live_shop_details data from Supabase (includes the 4 tables)
+            source: 'live_shop_details' // Mark that this came from live_shop_details
+          };
+
+          await dynamoDB.send(
+            new PutCommand({
+              TableName: 'ReleaseHistory',
+              Item: releaseHistoryItem
+            })
+          );
+          console.log(`[${shop_id}] SUCCESS: live_shop_details added to ReleaseHistory (DynamoDB) with sentdatetime: ${sentdatetime}`);
+        } catch (error) {
+          // Log error but don't fail the entire operation
+          console.error(`[${shop_id}] FAILED: Error adding live_shop_details to ReleaseHistory -`, error.message);
+        }
+      }
+      
+      // Since the query only uses shop_id in KeyConditionExpression, 
+      // the table likely only has shop_id as the partition key (no sort key)
+      // If it had a sort key, we would need to include it in the delete operation
+      const deleteKey = {
+        shop_id: shop_id
+      };
+
+      await dynamoDB.send(
+        new DeleteCommand({
+          TableName: 'Scheduled_Accepted_Customer_Review',
+          Key: deleteKey
+        })
+      );
+      console.log(`[${shop_id}] SUCCESS: Entry deleted from Scheduled_Accepted_Customer_Review`);
+    } catch (error) {
+      console.error(`[${shop_id}] FAILED: Error in live_shop_details storage/deletion step -`, error.message);
+      throw error;
+    }
+  } else {
+    console.warn(`[${shop_id}] WARNING: Supabase not configured; skipping Supabase upsert and live_shop_details storage`);
+  }
+
+  console.log(`[${shop_id}] SUCCESS: Scheduled review push to Supabase completed successfully`);
+  res.status(200).json({
+    success: true,
+    count: resultData.length,
+    data: resultData
+  });
+});
+
 // Get accepted customer reviews with location info (by shop_id from request body)
 exports.getAcceptedReviewsWithAddress = asyncHandler(async (req, res, next) => {
   const { shop_id } = req.body;

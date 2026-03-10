@@ -19,6 +19,16 @@ router.get('/release-history', collbineEndpoints.getReleaseHistory);
 
 router.get('/accepted-reviews-with-address', collbineEndpoints.getAcceptedReviewsWithAddress);
 
+router.get('/accepted-shop-ids', collbineEndpoints.getAcceptedShopIds);
+router.get('/accepted-review-details', collbineEndpoints.getAcceptedReviewDetails);
+router.post('/accepted-review-details', collbineEndpoints.getAcceptedReviewDetails);
+
+router.get('/scheduled-shop-ids', collbineEndpoints.getScheduledShopIds);
+router.get('/scheduled-review-details', collbineEndpoints.getScheduledReviewDetails);
+router.post('/scheduled-review-details', collbineEndpoints.getScheduledReviewDetails);
+
+router.post('/push-scheduled-review-to-supabase', collbineEndpoints.pushScheduledReviewToSupabase);
+
 // Export the router
 module.exports = router;
 
